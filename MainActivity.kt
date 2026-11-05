@@ -5,12 +5,14 @@ import android.app.Activity
 import android.content.ContentValues
 import android.content.pm.PackageManager
 import android.graphics.Color
+import android.graphics.Matrix
 import android.graphics.ImageFormat
 import android.graphics.SurfaceTexture
 import android.hardware.camera2.*
 import android.hardware.camera2.params.OutputConfiguration
 import android.hardware.camera2.params.SessionConfiguration
 import android.hardware.camera2.params.StreamConfigurationMap
+import android.media.CamcorderProfile
 import android.media.Image
 import android.media.ImageReader
 import android.media.MediaRecorder
@@ -243,10 +245,28 @@ class MainActivity : Activity() {
         fpsSpinner.setSelection(fpsOptions.indexOf(videoFps).coerceAtLeast(0))
 
         btnLens.text = lenses[lensIdx].label
+        val hs = try {
+            map.highSpeedVideoFpsRanges.joinToString("  ") { "[${it.lower}-${it.upper}]" }
+        } catch (e: Exception) { "" }
         tvInfo.text = "FPS que expone el sistema:\n" +
             fpsRanges.joinToString("  ") { "[${it.lower}-${it.upper}]" } +
+            "\nAlta velocidad: " + (if (hs.isEmpty()) "ninguna" else hs) +
+            "\nPerfiles: " + profileInfo() +
             "\nRAW: " + (if (rawSupported) "sí" else "no")
         updateUiState()
+    }
+
+    private fun profileInfo(): String {
+        val camId = lenses[lensIdx].id.toIntOrNull() ?: return "?"
+        return listOf(
+            "4K" to CamcorderProfile.QUALITY_2160P,
+            "1080p" to CamcorderProfile.QUALITY_1080P,
+            "720p" to CamcorderProfile.QUALITY_720P
+        ).joinToString("  ") { (n, q) ->
+            try {
+                if (CamcorderProfile.hasProfile(camId, q)) "$n=${CamcorderProfile.get(camId, q)?.videoFrameRate}fps" else "$n=no"
+            } catch (e: Exception) { "$n=?" }
+        }
     }
 
     private fun adapter(items: List<String>) =
@@ -281,6 +301,21 @@ class MainActivity : Activity() {
         var h = (cw / ratio).toInt()
         if (h > ch) { h = ch; w = (ch * ratio).toInt() }
         texture.layoutParams = FrameLayout.LayoutParams(w, h, Gravity.CENTER)
+        applyTransform(w, h)
+    }
+
+    // El sistema entrega la vista previa "derecha" para el teléfono en vertical.
+    // En horizontal hay que desestirar la imagen y girarla según la rotación real.
+    private fun applyTransform(w: Int, h: Int) {
+        val rot = windowManager.defaultDisplay.rotation
+        val m = Matrix()
+        if (rot == Surface.ROTATION_90 || rot == Surface.ROTATION_270) {
+            val cx = w / 2f
+            val cy = h / 2f
+            m.postScale(h.toFloat() / w, w.toFloat() / h, cx, cy)
+            m.postRotate(90f * (rot - 2), cx, cy)
+        }
+        texture.setTransform(m)
     }
 
     private fun startPreview() {
@@ -398,8 +433,8 @@ class MainActivity : Activity() {
     private fun orient(): Int {
         val s = capChars.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 90
         val front = capChars.get(CameraCharacteristics.LENS_FACING) == CameraMetadata.LENS_FACING_FRONT
-        // La app está bloqueada en horizontal (rotación de pantalla = 90°)
-        return if (front) (s + 90) % 360 else (s - 90 + 360) % 360
+        val d = windowManager.defaultDisplay.rotation * 90
+        return if (front) (s + d) % 360 else (s - d + 360) % 360
     }
 
     private fun takePhoto() {
@@ -466,7 +501,7 @@ class MainActivity : Activity() {
             val res: CaptureResult =
                 (if (phys != null && result is TotalCaptureResult) result.physicalCameraResults[phys] else null) ?: result
             val dng = DngCreator(capChars, res)
-            dng.setOrientation(1) // ORIENTATION_NORMAL (app en horizontal)
+            dng.setOrientation(when (orient()) { 90 -> 6; 180 -> 3; 270 -> 8; else -> 1 })
             val uri = newMedia(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, "RAW_${stamp()}.dng", "image/x-adobe-dng")
             if (uri != null) {
                 contentResolver.openOutputStream(uri)?.use { dng.writeImage(it, img) }
